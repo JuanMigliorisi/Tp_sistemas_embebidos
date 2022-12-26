@@ -1,452 +1,179 @@
-//=====[Libraries]=============================================================
-
 #include "mbed.h"
 #include "arm_book_lib.h"
+#include "string.h"
+#include "stdio.h"
+#include <iostream>
+#include <cstdlib>
 
-//=====[Defines]===============================================================
-
-#define NUMBER_OF_KEYS                           4
-#define BLINKING_TIME_GAS_ALARM               1000
-#define BLINKING_TIME_OVER_TEMP_ALARM          500
-#define BLINKING_TIME_GAS_AND_OVER_TEMP_ALARM  100
-#define NUMBER_OF_AVG_SAMPLES                   100
-#define OVER_TEMP_LEVEL                         50
-#define TIME_INCREMENT_MS                       10
-#define DEBOUNCE_BUTTON_TIME_MS                 40
-
-//=====[Declaration of public data types]======================================
+#define PWM_PERIOD_MS 80
+#define PWM_PULSE_WIDTH_uS 15
+#define NUMBER_OF_AVG_SAMPLES 20
+#define STR_BUFF_SIZE 20
+#define MAX_RANGE 480
 
 typedef enum {
-    BUTTON_UP,
-    BUTTON_DOWN,
-    BUTTON_FALLING,
-    BUTTON_RISING
-} buttonState_t;
+    READING_COMPLETE,
+    READING_IN_PROGRESS,
+    READING_MAX_RANGE   
+} SR04ReadingStatus_t;
 
-//=====[Declaration and initialization of public global objects]===============
+typedef enum {
+    MEASUREMENT_COMPLETE,
+    MEASUREMENT_IN_PROGRESS    
+} measurementStatus_t;
 
-DigitalIn enterButton(BUTTON1);
-DigitalIn alarmTestButton(D2);
-DigitalIn aButton(D4);
-DigitalIn bButton(D5);
-DigitalIn cButton(D6);
-DigitalIn dButton(D7);
-DigitalIn mq2(PE_12);
+//using namespace std::chrono;
 
-DigitalOut alarmLed(LED1);
-DigitalOut incorrectCodeLed(LED3);
-DigitalOut systemBlockedLed(LED2);
+// Objetos globales------------------------------------------------
+//interrup // HC SR04 Ultrasonic:
+InterruptIn SR04_echo(D2);
+//PWM
+PwmOut Usonic_trigger(PWM_OUT);//conectar el trigger a este PIN!!! D3
+// UART:
+UnbufferedSerial serial_port_usb(USBTX, USBRX, 115200);
+//UnbufferedSerial BT_serial_port(STDIO_UART_TX, STDIO_UART_RX, 9600);
 
-DigitalInOut sirenPin(PE_10);
+Timer echo_timer;
 
-UnbufferedSerial uartUsb(USBTX, USBRX, 115200);
+// --------- variables globales--------------- 
+int sensor_state = 0;
+float SR04ReadingsArray [NUMBER_OF_AVG_SAMPLES];
+float SR04ReadingsSum = 0.0;
+float SR04ReadingsAverage = 0.0;
+int comienzo, fin;
+double distancia = 4.54;
 
-AnalogIn lm35(A1);
+//prototipos de funciones
+void serial_port_usb_str_write( const char* str );
+void USB_serial_port_TASK();
+void serial_terminal_init();
+void uartTask (const SR04ReadingStatus_t reading_status, char * tecla_ingresada);
+//void BT_serial_port_str_write( const char* str );
+double get_distance_from_time_Reading (const float time_reading);
+SR04ReadingStatus_t ultrasonic_Ranging();
+void PWM_config();
 
-//=====[Declaration and initialization of public global variables]=============
+void start_stopwatch();
+void stop_stopwatch();
+// ------------------------------------------------------
 
-bool alarmState    = OFF;
-bool incorrectCode = false;
-bool overTempDetector = OFF;
+// inicio del main
+int main(){
+    measurementStatus_t measurementStatus = MEASUREMENT_IN_PROGRESS;
+    char serial_str[STR_BUFF_SIZE];
+    char tecla_ingresada = '\0';
+    SR04_echo.mode(PullDown);
+    PWM_config();
+    serial_terminal_init();//mensaje de inicio
+    //interrupciones
+    SR04_echo.rise(&start_stopwatch);
+    SR04_echo.fall(&stop_stopwatch);
 
-int numberOfIncorrectCodes = 0;
-int buttonBeingCompared    = 0;
-int codeSequence[NUMBER_OF_KEYS]   = { 1, 1, 0, 0 };
-int buttonsPressed[NUMBER_OF_KEYS] = { 0, 0, 0, 0 };
-int accumulatedTimeAlarm = 0;
-int lm35SampleIndex      = 0;
-
-bool gasDetectorState          = OFF;
-bool overTempDetectorState     = OFF;
-
-float potentiometerReading = 0.0;
-float lm35ReadingsAverage  = 0.0;
-float lm35ReadingsSum      = 0.0;
-float lm35ReadingsArray[NUMBER_OF_AVG_SAMPLES];
-float lm35TempC            = 0.0;
-
-int accumulatedDebounceButtonTime     = 0;
-int numberOfEnterButtonReleasedEvents = 0;
-buttonState_t enterButtonState;
-
-//=====[Declarations (prototypes) of public functions]=========================
-
-void inputsInit();
-void outputsInit();
-
-void alarmActivationUpdate();
-void alarmDeactivationUpdate();
-
-void uartTask();
-void availableCommands();
-bool areEqual();
-float celsiusToFahrenheit( float tempInCelsiusDegrees );
-float analogReadingScaledWithTheLM35Formula( float analogReading );
-void lm35ReadingsArrayInit();
-
-void debounceButtonInit();
-bool debounceButtonUpdate();
-
-//=====[Main function, the program entry point after power on or reset]========
-
-int main()
-{
-    inputsInit();
-    outputsInit();
+    
+    
+    //loop
     while (true) {
-        alarmActivationUpdate();
-        alarmDeactivationUpdate();
-        uartTask();
-        delay(TIME_INCREMENT_MS);
-    }
+        if( serial_port_usb.readable() ) {
+            serial_port_usb.read( &tecla_ingresada, 1 );
+            serial_port_usb_str_write(&tecla_ingresada);
+            serial_port_usb_str_write("\n");
+        }
+        while (tecla_ingresada != '\0'){
+           uartTask(ultrasonic_Ranging(), &tecla_ingresada);
+           delay(100);
+        }
+        
+        // printf("tiempo: %d us\n", fin - comienzo);
+        //distancia = ((fin - comienzo) * 0.34 ) / 2; 
+        //if (ultrasonic_Ranging() == READING_COMPLETE) {
+            //printf("distancia: %d.%d mm\n", (int)distancia, int((distancia-(int)distancia)*100));
+            //serial_port_usb_str_write("hh\n");
+            //USB_serial_port_TASK();
+            //}
+    }//fin loop
+        
+}//--------------------------------- fin del main
+ 
+// FUNCIONES 
+// Ultrasonic -------------------
+void start_stopwatch(){
+    echo_timer.start();
+    comienzo = echo_timer.read_us();
 }
-
-//=====[Implementations of public functions]===================================
-
-void inputsInit()
-{
-    lm35ReadingsArrayInit();
-    alarmTestButton.mode(PullDown);
-    aButton.mode(PullDown);
-    bButton.mode(PullDown);
-    cButton.mode(PullDown);
-    dButton.mode(PullDown);
-    sirenPin.mode(OpenDrain);
-    sirenPin.input();
-    debounceButtonInit();
+void stop_stopwatch(){
+    echo_timer.stop();
+    //sensor_state = MEASUREMENT_OK;
+    fin = echo_timer.read_us();
 }
-
-void outputsInit()
+// UART--------------------------------------
+void serial_port_usb_str_write( const char* str )
 {
-    alarmLed = OFF;
-    incorrectCodeLed = OFF;
-    systemBlockedLed = OFF;
+    serial_port_usb.write( str, strlen(str) );
 }
+//void BT_serial_port_str_write( const char* str ){
+  //  BT_serial_port.write( str, strlen(str) );
+//}
 
-void alarmActivationUpdate()
-{
-    static int lm35SampleIndex = 0;
+void USB_serial_port_TASK(){
+    //if (sensor_state == MEASUREMENT_OK){    }
+}
+void serial_terminal_init(){
+    serial_port_usb_str_write(" * INFILTROMETRO ELECTRONICO * \n");
+    serial_port_usb_str_write(" * Presione cualquier tecla para comenzar una nueva medicion* \n");
+}
+// ---------------------------------
+// ------ PWM ---------------
+void PWM_config(){
+    Usonic_trigger.period_ms(PWM_PERIOD_MS);
+    Usonic_trigger.pulsewidth_us(PWM_PULSE_WIDTH_uS);
+
+}
+SR04ReadingStatus_t ultrasonic_Ranging(){
+    SR04ReadingStatus_t status = READING_IN_PROGRESS;
+    static int SR04SampleIndex = 0;
     int i = 0;
+    SR04ReadingsArray[SR04SampleIndex] = fin - comienzo;
+    SR04SampleIndex++;
 
-    lm35ReadingsArray[lm35SampleIndex] = lm35.read();
-    lm35SampleIndex++;
-    if ( lm35SampleIndex >= NUMBER_OF_AVG_SAMPLES) {
-        lm35SampleIndex = 0;
+    if ( SR04SampleIndex >= NUMBER_OF_AVG_SAMPLES) {
+        SR04SampleIndex = 0;
+        status = READING_COMPLETE;
+        return status;
     }
-    
-    lm35ReadingsSum = 0.0;
+    SR04ReadingsSum = 0.0;
     for (i = 0; i < NUMBER_OF_AVG_SAMPLES; i++) {
-        lm35ReadingsSum = lm35ReadingsSum + lm35ReadingsArray[i];
+        SR04ReadingsSum = SR04ReadingsSum + SR04ReadingsArray[i];
     }
-    lm35ReadingsAverage = lm35ReadingsSum / NUMBER_OF_AVG_SAMPLES;
-       lm35TempC = analogReadingScaledWithTheLM35Formula ( lm35ReadingsAverage );    
-    
-    if ( lm35TempC > OVER_TEMP_LEVEL ) {
-        overTempDetector = ON;
-    } else {
-        overTempDetector = OFF;
+    SR04ReadingsAverage = SR04ReadingsSum / NUMBER_OF_AVG_SAMPLES;
+    distancia = get_distance_from_time_Reading ( SR04ReadingsAverage );
+    if (distancia > MAX_RANGE){
+        status = READING_MAX_RANGE;
     }
-
-    if( !mq2) {
-        gasDetectorState = ON;
-        alarmState = ON;
-    }
-    if( overTempDetector ) {
-        overTempDetectorState = ON;
-        alarmState = ON;
-    }
-    if( alarmTestButton ) {             
-        overTempDetectorState = ON;
-        gasDetectorState = ON;
-        alarmState = ON;
-    }
-    if( alarmState ) { 
-        accumulatedTimeAlarm = accumulatedTimeAlarm + TIME_INCREMENT_MS;
-        sirenPin.output();                                     
-        sirenPin = LOW;                                
-
-        if( gasDetectorState && overTempDetectorState ) {
-            if( accumulatedTimeAlarm >= BLINKING_TIME_GAS_AND_OVER_TEMP_ALARM ) {
-                accumulatedTimeAlarm = 0;
-                alarmLed = !alarmLed;
-            }
-        } else if( gasDetectorState ) {
-            if( accumulatedTimeAlarm >= BLINKING_TIME_GAS_ALARM ) {
-                accumulatedTimeAlarm = 0;
-                alarmLed = !alarmLed;
-            }
-        } else if ( overTempDetectorState ) {
-            if( accumulatedTimeAlarm >= BLINKING_TIME_OVER_TEMP_ALARM  ) {
-                accumulatedTimeAlarm = 0;
-                alarmLed = !alarmLed;
-            }
-        }
-    } else{
-        alarmLed = OFF;
-        gasDetectorState = OFF;
-        overTempDetectorState = OFF;
-        sirenPin.input();                                  
-    }
+    return status;
 }
-
-void alarmDeactivationUpdate()
-{
-    if ( numberOfIncorrectCodes < 5 ) {
-        bool enterButtonReleasedEvent = debounceButtonUpdate();
-        if( enterButtonReleasedEvent ) {
-            if( incorrectCodeLed ) {
-                numberOfEnterButtonReleasedEvents++;
-                if( numberOfEnterButtonReleasedEvents >= 2 ) {
-                    incorrectCodeLed = OFF;
-                    numberOfEnterButtonReleasedEvents = 0;
-                }
-            } else {
-                if ( alarmState ) {
-                    buttonsPressed[0] = aButton;
-                    buttonsPressed[1] = bButton;
-                    buttonsPressed[2] = cButton;
-                    buttonsPressed[3] = dButton;
-                    if ( areEqual() ) {
-                        alarmState = OFF;
-                        numberOfIncorrectCodes = 0;
-                    } else {
-                        incorrectCodeLed = ON;
-                        numberOfIncorrectCodes++;
-                    }
-                }
-            }
-        }
-    } else {
-        systemBlockedLed = ON;
-    }
+double get_distance_from_time_Reading (const float time_reading){
+    //retun distance in mm from reading in us:
+    double d = (time_reading * 0.34 ) / 2;
+    return d;
 }
-
-void uartTask()
-{
-    char receivedChar = '\0';
-    char str[100];
-    int stringLength;
-    if( uartUsb.readable() ) {
-        uartUsb.read( &receivedChar, 1 );
-        switch (receivedChar) {
-        case '1':
-            if ( alarmState ) {
-                uartUsb.write( "The alarm is activated\r\n", 24);
-            } else {
-                uartUsb.write( "The alarm is not activated\r\n", 28);
-            }
+void uartTask (SR04ReadingStatus_t reading_status, char * tecla_ingresada){
+    switch (reading_status) {
+        case READING_COMPLETE:
+            printf("distancia: %d.%d mm\n", (int)distancia, int((distancia-(int)distancia)*10));
+            serial_port_usb_str_write(" \n");
             break;
 
-        case '2':
-            if ( !mq2 ) {
-                uartUsb.write( "Gas is being detected\r\n", 22);
-            } else {
-                uartUsb.write( "Gas is not being detected\r\n", 27);
-            }
-            break;
+        case 1://READING_IN_PROGRESS
+            break; 
 
-        case '3':
-            if ( overTempDetector ) {
-                uartUsb.write( "Temperature is above the maximum level\r\n", 40);
-            } else {
-                uartUsb.write( "Temperature is below the maximum level\r\n", 40);
-            }
-            break;
+        case 2://READING_MAX_RANGE
+            serial_port_usb_str_write("Medicion fuera de rango\n");
+            serial_port_usb_str_write(" * Presione cualquier tecla para comenzar una nueva medicion* \n");
+            *tecla_ingresada = '\0';
+            break; 
             
-        case '4':
-            uartUsb.write( "Please enter the code sequence.\r\n", 33 );
-            uartUsb.write( "First enter 'A', then 'B', then 'C', and ", 41 ); 
-            uartUsb.write( "finally 'D' button\r\n", 20 );
-            uartUsb.write( "In each case type 1 for pressed or 0 for ", 41 );
-            uartUsb.write( "not pressed\r\n", 13 );
-            uartUsb.write( "For example, for 'A' = pressed, ", 32 );
-            uartUsb.write( "'B' = pressed, 'C' = not pressed, ", 34);
-            uartUsb.write( "'D' = not pressed, enter '1', then '1', ", 40 );
-            uartUsb.write( "then '0', and finally '0'\r\n\r\n", 29 );
-
-            incorrectCode = false;
-
-            for ( buttonBeingCompared = 0;
-                  buttonBeingCompared < NUMBER_OF_KEYS;
-                  buttonBeingCompared++) {
-
-                uartUsb.read( &receivedChar, 1 );
-                uartUsb.write( "*", 1 );
-
-                if ( receivedChar == '1' ) {
-                    if ( codeSequence[buttonBeingCompared] != 1 ) {
-                        incorrectCode = true;
-                    }
-                } else if ( receivedChar == '0' ) {
-                    if ( codeSequence[buttonBeingCompared] != 0 ) {
-                        incorrectCode = true;
-                    }
-                } else {
-                    incorrectCode = true;
-                }
-            }
-
-            if ( incorrectCode == false ) {
-                uartUsb.write( "\r\nThe code is correct\r\n\r\n", 25 );
-                alarmState = OFF;
-                incorrectCodeLed = OFF;
-                numberOfIncorrectCodes = 0;
-            } else {
-                uartUsb.write( "\r\nThe code is incorrect\r\n\r\n", 27 );
-                incorrectCodeLed = ON;
-                numberOfIncorrectCodes++;
-            }
-            break;
-
-        case '5':
-            uartUsb.write( "Please enter new code sequence\r\n", 32 );
-            uartUsb.write( "First enter 'A', then 'B', then 'C', and ", 41 );
-            uartUsb.write( "finally 'D' button\r\n", 20 );
-            uartUsb.write( "In each case type 1 for pressed or 0 for not ", 45 );
-            uartUsb.write( "pressed\r\n", 9 );
-            uartUsb.write( "For example, for 'A' = pressed, 'B' = pressed,", 46 );
-            uartUsb.write( " 'C' = not pressed,", 19 );
-            uartUsb.write( "'D' = not pressed, enter '1', then '1', ", 40 );
-            uartUsb.write( "then '0', and finally '0'\r\n\r\n", 29 );
-
-            for ( buttonBeingCompared = 0; 
-                  buttonBeingCompared < NUMBER_OF_KEYS; 
-                  buttonBeingCompared++) {
-
-                uartUsb.read( &receivedChar, 1 );
-                uartUsb.write( "*", 1 );
-
-                if ( receivedChar == '1' ) {
-                    codeSequence[buttonBeingCompared] = 1;
-                } else if ( receivedChar == '0' ) {
-                    codeSequence[buttonBeingCompared] = 0;
-                }
-            }
-
-            uartUsb.write( "\r\nNew code generated\r\n\r\n", 24 );
-            break;
-
-        case 'c':
-        case 'C':
-            sprintf ( str, "Temperature: %.2f \xB0 C\r\n", lm35TempC );
-            stringLength = strlen(str);
-            uartUsb.write( str, stringLength );
-            break;
-
-        case 'f':
-        case 'F':
-            sprintf ( str, "Temperature: %.2f \xB0 F\r\n", 
-                celsiusToFahrenheit( lm35TempC ) );
-            stringLength = strlen(str);
-            uartUsb.write( str, stringLength );
-            break;
-
         default:
-            availableCommands();
-            break;
-
-        }
-    }
-}
-
-void availableCommands()
-{
-    uartUsb.write( "Available commands:\r\n", 21 );
-    uartUsb.write( "Press '1' to get the alarm state\r\n", 34 );
-    uartUsb.write( "Press '2' to get the gas detector state\r\n", 41 );
-    uartUsb.write( "Press '3' to get the over temperature detector state\r\n", 54 );
-    uartUsb.write( "Press '4' to enter the code sequence\r\n", 38 );
-    uartUsb.write( "Press '5' to enter a new code\r\n", 31 );
-    uartUsb.write( "Press 'f' or 'F' to get lm35 reading in Fahrenheit\r\n", 52 );
-    uartUsb.write( "Press 'c' or 'C' to get lm35 reading in Celsius\r\n\r\n", 51 );
-}
-
-bool areEqual()
-{
-    int i;
-
-    for (i = 0; i < NUMBER_OF_KEYS; i++) {
-        if (codeSequence[i] != buttonsPressed[i]) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-float analogReadingScaledWithTheLM35Formula( float analogReading )
-{
-    return ( analogReading * 3.3 / 0.01 );
-}
-
-float celsiusToFahrenheit( float tempInCelsiusDegrees )
-{
-    return ( tempInCelsiusDegrees * 9.0 / 5.0 + 32.0 );
-}
-void lm35ReadingsArrayInit()
-{
-    int i;
-    for( i=0; i<NUMBER_OF_AVG_SAMPLES ; i++ ) {
-        lm35ReadingsArray[i] = 0;
-    }
-}
-
-void debounceButtonInit()
-{
-    if( enterButton ) {
-        enterButtonState = BUTTON_DOWN;
-    } else {
-        enterButtonState = BUTTON_UP;
-    }
-}
-
-bool debounceButtonUpdate()
-{
-    bool enterButtonReleasedEvent = false;
-    switch( enterButtonState ) {
-
-    case BUTTON_UP:
-        if( enterButton ) {
-            enterButtonState = BUTTON_FALLING;
-            accumulatedDebounceButtonTime = 0;
-        }
-        break;
-
-    case BUTTON_FALLING:
-        if( accumulatedDebounceButtonTime >= DEBOUNCE_BUTTON_TIME_MS ) {
-            if( enterButton ) {
-                enterButtonState = BUTTON_DOWN;
-            } else {
-                enterButtonState = BUTTON_UP;
-            }
-        }
-        accumulatedDebounceButtonTime = accumulatedDebounceButtonTime +
-                                        TIME_INCREMENT_MS;
-        break;
-
-    case BUTTON_DOWN:
-        if( !enterButton ) {
-            enterButtonState = BUTTON_RISING;
-            accumulatedDebounceButtonTime = 0;
-        }
-        break;
-
-    case BUTTON_RISING:
-        if( accumulatedDebounceButtonTime >= DEBOUNCE_BUTTON_TIME_MS ) {
-            if( !enterButton ) {
-                enterButtonState = BUTTON_UP;
-                enterButtonReleasedEvent = true;
-            } else {
-                enterButtonState = BUTTON_DOWN;
-            }
-        }
-        accumulatedDebounceButtonTime = accumulatedDebounceButtonTime +
-                                        TIME_INCREMENT_MS;
-        break;
-
-    default:
-        debounceButtonInit();
-        break;
-    }
-    return enterButtonReleasedEvent;
+            break;        
+    }   
+    return;
 }
